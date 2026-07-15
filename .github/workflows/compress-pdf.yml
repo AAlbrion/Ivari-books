@@ -1,0 +1,63 @@
+name: PDF komprimieren
+
+# Läuft automatisch, sobald eine PDF im Ordner raw/ hochgeladen/geändert wird.
+# Komprimiert mit Ghostscript (/ebook = 150 dpi, Bilder bleiben erhalten) und
+# legt das fertige, kleinere PDF in books/ ab — das die App über jsDelivr liest.
+on:
+  push:
+    paths:
+      - "raw/**.pdf"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pdf-compress
+  cancel-in-progress: false
+
+jobs:
+  compress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ghostscript installieren
+        run: sudo apt-get update && sudo apt-get install -y ghostscript
+
+      - name: PDFs komprimieren
+        run: |
+          set -e
+          mkdir -p books
+          shopt -s nullglob
+          changed=0
+          for f in raw/*.pdf; do
+            name="$(basename "$f")"
+            out="books/$name"
+            echo "::group::$name"
+            gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.5 -dPDFSETTINGS=/ebook \
+               -dNOPAUSE -dQUIET -dBATCH -dDetectDuplicateImages=true \
+               -dCompressFonts=true -dSubsetFonts=true \
+               -sOutputFile="$out.tmp" "$f"
+            orig=$(stat -c%s "$f")
+            comp=$(stat -c%s "$out.tmp")
+            # Sicherung: nie größer werden als das Original.
+            if [ "$comp" -lt "$orig" ]; then
+              mv -f "$out.tmp" "$out"
+              echo "$name: $orig -> $comp Bytes (komprimiert)"
+            else
+              cp -f "$f" "$out"
+              rm -f "$out.tmp"
+              echo "$name: Original beibehalten ($orig Bytes, Komprimierung brachte nichts)"
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Ergebnis committen
+        run: |
+          git config user.name "pdf-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add books
+          # [skip ci] + paths-Filter (nur raw/**) verhindern eine Endlosschleife.
+          git diff --cached --quiet || git commit -m "PDF(s) komprimiert [skip ci]"
+          git push
